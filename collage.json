@@ -1,0 +1,71 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/secure",
+  "description": "A collage plugin that sends the security headers a site should, and a Content-Security-Policy with per-request nonces.",
+  "repository": "https://github.com/Elagoht/collage-secure",
+  "templateFunctions": [
+    {
+      "name": "cspNonce",
+      "signature": "cspNonce",
+      "insert": "cspNonce",
+      "doc": "The response's Content-Security-Policy nonce, for an inline script or style: `<script nonce=\"{{cspNonce}}\">`. Fresh on every response, even for a cached page."
+    }
+  ],
+  "snippets": {
+    "collage-secure inline script": {
+      "language": "html",
+      "prefix": "cnonce",
+      "body": [
+        "<script nonce=\"{{cspNonce}}\">",
+        "  $0",
+        "</script>"
+      ],
+      "description": "collage-secure: an inline script allowed by the Content-Security-Policy"
+    }
+  },
+  "config": {
+    "type": "object",
+    "description": "A collage plugin that sends the security headers a site should, and a Content-Security-Policy with per-request nonces.",
+    "properties": {
+      "crossOriginOpenerPolicy": {
+        "type": "string",
+        "description": "CrossOriginOpenerPolicy is Cross-Origin-Opener-Policy. Default \"same-origin\"."
+      },
+      "csp": {
+        "type": "string",
+        "description": "CSP is the Content-Security-Policy. \"{nonce}\" in it is replaced by the response's nonce, which {{cspNonce}} puts on the page's inline scripts and styles. Empty sends none."
+      },
+      "cspReportOnly": {
+        "type": "boolean",
+        "description": "CSPReportOnly sends the policy as Content-Security-Policy-Report-Only: violations are reported, nothing is blocked. In development the policy is always report-only, so collage's own reload script keeps working."
+      },
+      "frameOptions": {
+        "type": "string",
+        "description": "FrameOptions is X-Frame-Options. Default \"SAMEORIGIN\"."
+      },
+      "hsts": {
+        "type": "integer",
+        "description": "HSTS is how long, in seconds, a browser should use only HTTPS for the site, sent on requests that arrived over TLS — directly or, by X-Forwarded-Proto, through a proxy. Default two years; negative sends none."
+      },
+      "hstsPreload": {
+        "type": "boolean"
+      },
+      "hstsSubdomains": {
+        "type": "boolean",
+        "description": "HSTSSubdomains and HSTSPreload add includeSubDomains and preload."
+      },
+      "noSniff": {
+        "type": "boolean",
+        "description": "NoSniff turns X-Content-Type-Options: nosniff off when false is set in configuration; it is on by default."
+      },
+      "permissionsPolicy": {
+        "type": "string",
+        "description": "PermissionsPolicy is Permissions-Policy: \"camera=(), microphone=()\". Empty sends none."
+      },
+      "referrerPolicy": {
+        "type": "string",
+        "description": "ReferrerPolicy is Referrer-Policy. Default \"strict-origin-when-cross-origin\"."
+      }
+    }
+  }
+}
