@@ -20,6 +20,14 @@
 // header — the way collage itself puts each reader's forgery token into a cached
 // form. A page carrying a nonce is answered without an ETag, since a 304 would
 // have the browser keep the old page under the new header.
+//
+// # Static builds
+//
+// A page a static build writes is served by whatever hosts the files, never by
+// this middleware, and a file cannot carry a nonce that changes per response. So
+// in a static render the nonce attribute is removed, leaving the script, rather
+// than writing the placeholder into the file. Allow those inline scripts in the
+// host's own policy, by hash or otherwise.
 package secure
 
 import (
@@ -29,9 +37,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Elagoht/collage/pkg/collage"
@@ -77,6 +88,10 @@ type Plugin struct {
 	opts   Options
 	dev    bool
 	marker string
+	// nonceAttr matches a nonce attribute holding the marker, quoted or not.
+	nonceAttr *regexp.Regexp
+	log       *slog.Logger
+	warnOnce  sync.Once
 }
 
 // New returns a plugin with opts as its starting point, which the application's
@@ -84,7 +99,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.1" }
+func (p *Plugin) Version() string                { return "0.1.2" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Configure reads the configuration and adds {{cspNonce}}.
@@ -100,6 +115,8 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 		return fmt.Errorf("secure: %w", err)
 	}
 	p.marker = "collage-csp-nonce-" + hex.EncodeToString(raw[:])
+	m := regexp.QuoteMeta(p.marker)
+	p.nonceAttr = regexp.MustCompile(`\s+nonce\s*=\s*(?:"` + m + `"|'` + m + `'|` + m + `\b)`)
 	return host.AddTemplateFunc("cspNonce", func() string { return p.marker })
 }
 
@@ -108,7 +125,27 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	if p.marker == "" {
 		return fmt.Errorf("secure: register the plugin in Config.Plugins, where Configure runs; {{cspNonce}} needs it")
 	}
+	p.log = host.Logger()
 	return host.Use(p.middleware)
+}
+
+// OnAfterRender takes the placeholder out of a static render, which no
+// middleware will serve: see "Static builds" above. A render for a request is
+// left alone, since the middleware puts the nonce in on the way out.
+func (p *Plugin) OnAfterRender(_ context.Context, ev *collage.AfterRenderEvent) error {
+	if !ev.Static || p.marker == "" || !bytes.Contains(ev.HTML, []byte(p.marker)) {
+		return nil
+	}
+	html := p.nonceAttr.ReplaceAll(ev.HTML, nil)
+	// Wherever else it was written, it means nothing without a nonce.
+	ev.HTML = bytes.ReplaceAll(html, []byte(p.marker), nil)
+	p.warnOnce.Do(func() {
+		if p.log != nil && p.opts.CSP != "" {
+			p.log.Warn("secure: a static build cannot carry per-response CSP nonces; " +
+				"they were removed, so allow the inline scripts in the host's own policy")
+		}
+	})
+	return nil
 }
 
 func (p *Plugin) middleware(next http.Handler) http.Handler {

@@ -51,6 +51,16 @@ page with its old nonce under the new header, and every inline script would be
 blocked. Only HTML is held back to do this; an event stream, an image, a JSON
 document pass straight through.
 
+## Static builds
+
+A page `collage export` writes is served by whatever hosts the files, never by
+this middleware, and a file cannot carry a nonce that changes per response. So
+in a static render the `nonce` attribute is removed and the script kept, rather
+than the placeholder written into the file; the build logs a warning once when a
+policy is configured. Allow those inline scripts in the host's own policy — by
+hash, for instance. (Before v0.1.2 the placeholder, `collage-csp-nonce-…`, was
+left in the exported HTML.)
+
 ## Development
 
 In development the policy is sent as `Content-Security-Policy-Report-Only`

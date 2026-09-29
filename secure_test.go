@@ -1,6 +1,7 @@
 package secure_test
 
 import (
+	"context"
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,8 @@ func site(t *testing.T, dev bool, opts secure.Options) *collage.App {
 		DevMode: dev,
 		Server:  collage.ServerConfig{Host: "localhost", Port: 3000},
 		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<html><body><script nonce="{{cspNonce}}">go()</script></body></html>`)},
+			"t/p.html":  {Data: []byte(`<html><body><script nonce="{{cspNonce}}">go()</script></body></html>`)},
+			"t/nf.html": {Data: []byte(`<html><body><script nonce='{{cspNonce}}'>go()</script></body></html>`)},
 		}, Root: "t"},
 		Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
 		Plugins: []collage.Plugin{secure.New(opts)},
@@ -125,5 +127,41 @@ func TestDevelopmentOnlyReports(t *testing.T) {
 	rec := do(site(t, true, secure.Options{CSP: "script-src 'self'"}), httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Header().Get("Content-Security-Policy") != "" || rec.Header().Get("Content-Security-Policy-Report-Only") != "script-src 'self'" {
 		t.Errorf("headers = %v", rec.Header())
+	}
+}
+
+// A static build writes pages no middleware will ever serve, so the placeholder
+// would reach the file — and a file cannot carry a per-response nonce at all.
+// The attribute goes; the script stays.
+func TestStaticRenderCarriesNoPlaceholder(t *testing.T) {
+	app := site(t, false, secure.Options{CSP: "script-src 'nonce-{nonce}'"})
+	notFound := collage.NewPage("not-found").WithContent(collage.NewFragment("nf", "nf.html").Build()).Build()
+	if err := app.RegisterPage(notFound); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RegisterNotFoundPage(notFound); err != nil {
+		t.Fatal(err)
+	}
+	page, err := app.RenderPath(context.Background(), "/", "en", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := app.RenderNotFound(context.Background(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, html := range map[string]string{"page": string(page.HTML), "404": string(missing.HTML)} {
+		if strings.Contains(html, "collage-csp-nonce") || strings.Contains(html, "nonce") {
+			t.Errorf("%s: static render carries a nonce: %s", name, html)
+		}
+		if !strings.Contains(html, "<script>go()</script>") {
+			t.Errorf("%s: the script itself is gone: %s", name, html)
+		}
+	}
+
+	// A request still gets its nonce: the static render changed nothing cached.
+	rec := do(app, httptest.NewRequest(http.MethodGet, "/", nil))
+	if m := nonceAttr.FindStringSubmatch(rec.Body.String()); m == nil || strings.Contains(m[1], "collage-csp-nonce") {
+		t.Errorf("served page lost its nonce: %s", rec.Body.String())
 	}
 }
