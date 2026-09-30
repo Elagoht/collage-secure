@@ -99,7 +99,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.3" }
+func (p *Plugin) Version() string                { return "0.1.4" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Configure reads the configuration and adds {{cspNonce}}.
@@ -181,10 +181,19 @@ func (p *Plugin) static(h http.Header, r *http.Request) {
 	o := p.opts
 	if o.NoSniff == nil || *o.NoSniff {
 		h.Set("X-Content-Type-Options", "nosniff")
+	} else {
+		// Turned off explicitly: remove it, in case the framework's own baseline
+		// (collage v0.39.0 sends nosniff by default) already set it — "off" has to
+		// mean off, not "off unless something below me set it".
+		h.Del("X-Content-Type-Options")
 	}
 	set := func(name, value, def string) {
 		switch value {
 		case "-":
+			// Omit deliberately: delete it, so it overrides a framework baseline
+			// that set it (X-Frame-Options is a collage v0.39.0 default), not just
+			// decline to set it ourselves.
+			h.Del(name)
 		case "":
 			if def != "" {
 				h.Set(name, def)
