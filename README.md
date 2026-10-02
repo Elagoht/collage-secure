@@ -45,11 +45,16 @@ page carries the placeholder; the plugin's middleware puts a fresh nonce in its
 place on the way out, and names the same nonce in the header. It is how collage
 itself puts each reader's forgery token into a cached form.
 
-A page carrying a nonce is sent with `Cache-Control: no-store` and no `ETag`, and
-its request is answered unconditionally: a `304` would have the browser keep the
-page with its old nonce under the new header, and every inline script would be
-blocked. Only HTML is held back to do this; an event stream, an image, a JSON
-document pass straight through.
+A page carrying a nonce is sent with `Cache-Control: no-store` and no `ETag` or
+`Last-Modified`, so the browser holds no validator to revalidate it with: a `304`
+would have it keep the page with its old nonce under the new header, and every
+inline script would be blocked. `If-None-Match: *`, which matches any page, is
+dropped from requests. Every other conditional request reaches its handler as
+sent, so a handler's own `ETag`, a document, a mounted file still answer `304`.
+Only HTML is held back to put the nonce in; an event stream, an image, a JSON
+document pass straight through. (Before v0.1.5, with a policy set, every request lost its
+`If-None-Match` and `If-Modified-Since`, and nothing behind the plugin could
+answer `304`.)
 
 ## Static builds
 

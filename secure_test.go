@@ -165,3 +165,66 @@ func TestStaticRenderCarriesNoPlaceholder(t *testing.T) {
 		t.Errorf("served page lost its nonce: %s", rec.Body.String())
 	}
 }
+
+// Only a page carrying a nonce must be answered in full. Everything else behind
+// the plugin is revalidated as usual: a handler's own ETag, a document's, a
+// mounted file's Last-Modified.
+func TestOthersAnswerConditionalRequests(t *testing.T) {
+	app := site(t, false, secure.Options{CSP: "default-src 'self'"})
+	if err := app.Handle("/feed", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+		w.Header().Set("ETag", `"v1"`)
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = w.Write([]byte("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"))
+	})); err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := app.Mount("/static/", fstest.MapFS{"app.css": {Data: []byte("body{}"), ModTime: modified}}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/feed", nil)
+	r.Header.Set("If-None-Match", `"v1"`)
+	if rec := do(app, r); rec.Code != http.StatusNotModified {
+		t.Errorf("handler: status %d, want 304", rec.Code)
+	}
+
+	etag := do(app, httptest.NewRequest(http.MethodGet, "/data.json", nil)).Header().Get("ETag")
+	r = httptest.NewRequest(http.MethodGet, "/data.json", nil)
+	r.Header.Set("If-None-Match", etag)
+	if rec := do(app, r); rec.Code != http.StatusNotModified {
+		t.Errorf("document: status %d, want 304", rec.Code)
+	}
+
+	r = httptest.NewRequest(http.MethodGet, "/static/app.css", nil)
+	r.Header.Set("If-Modified-Since", modified.Format(http.TimeFormat))
+	if rec := do(app, r); rec.Code != http.StatusNotModified {
+		t.Errorf("mount: status %d, want 304", rec.Code)
+	}
+}
+
+// "*" matches whatever ETag a page has, so it is the one validator a client can
+// send for a page carrying a nonce without ever having been given one.
+func TestWildcardDoesNotRevalidateANoncePage(t *testing.T) {
+	app := site(t, false, secure.Options{CSP: "script-src 'nonce-{nonce}'"})
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodGet} {
+		r := httptest.NewRequest(method, "/", nil)
+		r.Header.Set("If-None-Match", "*")
+		rec := do(app, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200", method, rec.Code)
+		}
+		if rec.Header().Get("ETag") != "" || rec.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("%s: ETag %q, Cache-Control %q", method, rec.Header().Get("ETag"), rec.Header().Get("Cache-Control"))
+		}
+		if method == http.MethodGet {
+			if m := nonceAttr.FindStringSubmatch(rec.Body.String()); m == nil || strings.Contains(m[1], "collage-csp-nonce") {
+				t.Errorf("page carries no nonce: %s", rec.Body.String())
+			}
+		}
+	}
+}

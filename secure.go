@@ -19,7 +19,8 @@
 // plugin's middleware puts a fresh nonce in its place and the same nonce in the
 // header — the way collage itself puts each reader's forgery token into a cached
 // form. A page carrying a nonce is answered without an ETag, since a 304 would
-// have the browser keep the old page under the new header.
+// have the browser keep the old page under the new header. Other responses keep
+// their validators and answer conditional requests as usual.
 //
 // # Static builds
 //
@@ -99,7 +100,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.4" }
+func (p *Plugin) Version() string                { return "0.1.5" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Configure reads the configuration and adds {{cspNonce}}.
@@ -165,11 +166,15 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 			name += "-Report-Only"
 		}
 		w.Header().Set(name, strings.ReplaceAll(p.opts.CSP, "{nonce}", nonce))
-		// A cached page could be revalidated to 304 and kept by the browser with
-		// the nonce it was first sent, under this response's header. Asked
-		// unconditionally, the page comes back with the nonce the header names.
-		r.Header.Del("If-None-Match")
-		r.Header.Del("If-Modified-Since")
+		// A page answered 304 would be kept by the browser with the nonce it was
+		// first sent, under this response's header. A page carrying a nonce is
+		// never sent its ETag (finish), and collage does not revalidate pages by
+		// date, so the one validator that could match it is "*", which matches
+		// anything. That alone goes; every other conditional request reaches the
+		// handler, so a feed, a document or a mounted file still answers 304.
+		if strings.TrimSpace(r.Header.Get("If-None-Match")) == "*" {
+			r.Header.Del("If-None-Match")
+		}
 		rw := &nonceWriter{ResponseWriter: w, marker: []byte(p.marker), nonce: []byte(nonce), head: r.Method == http.MethodHead}
 		next.ServeHTTP(rw, r)
 		rw.finish()
@@ -294,6 +299,7 @@ func (w *nonceWriter) finish() {
 		body = bytes.ReplaceAll(body, w.marker, w.nonce)
 		h := w.Header()
 		h.Del("ETag")
+		h.Del("Last-Modified")
 		h.Set("Cache-Control", "no-store")
 	}
 	if !w.head {
