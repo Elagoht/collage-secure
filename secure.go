@@ -135,14 +135,13 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 
 // OnAfterRender takes the placeholder out of a static render, which no
 // middleware will serve: see "Static builds" above. A render for a request is
-// left alone, since the middleware puts the nonce in on the way out.
+// left alone: OnPersonalise puts the nonce in, or takes the placeholder out,
+// on the way to each reader.
 func (p *Plugin) OnAfterRender(_ context.Context, ev *collage.AfterRenderEvent) error {
 	if !ev.Static || p.marker == "" || !bytes.Contains(ev.HTML, []byte(p.marker)) {
 		return nil
 	}
-	html := p.nonceAttr.ReplaceAll(ev.HTML, nil)
-	// Wherever else it was written, it means nothing without a nonce.
-	ev.HTML = bytes.ReplaceAll(html, []byte(p.marker), nil)
+	ev.HTML = p.strip(ev.HTML)
 	p.warnOnce.Do(func() {
 		if p.log != nil && p.opts.CSP != "" {
 			p.log.Warn("secure: a static build cannot carry per-response CSP nonces; " +
@@ -150,6 +149,13 @@ func (p *Plugin) OnAfterRender(_ context.Context, ev *collage.AfterRenderEvent) 
 		}
 	})
 	return nil
+}
+
+// strip removes the nonce attributes holding the marker, and the marker
+// wherever else it was written: without a nonce it means nothing. It returns a
+// new slice and never writes into html.
+func (p *Plugin) strip(html []byte) []byte {
+	return bytes.ReplaceAll(p.nonceAttr.ReplaceAll(html, nil), []byte(p.marker), nil)
 }
 
 func (p *Plugin) middleware(next http.Handler) http.Handler {
@@ -245,26 +251,33 @@ type nonceKey struct{}
 // OnPersonalise puts this response's nonce where {{cspNonce}} left the marker.
 // It runs after collage's page cache and inside every middleware, so before a
 // compressor: the order plugins are listed in no longer matters.
+//
+// With no policy naming a nonce, the marker is removed as a static render
+// removes it, and the page stays as cacheable as it was. That is done here,
+// not before the cache, so a page cached under one configuration is never sent
+// under another.
 func (p *Plugin) OnPersonalise(_ context.Context, ev *collage.PersonaliseEvent) error {
 	if p.marker == "" || !bytes.Contains(ev.Body, []byte(p.marker)) {
 		return nil
 	}
+	if !strings.Contains(p.opts.CSP, "{nonce}") {
+		ev.Body = p.strip(ev.Body)
+		return nil
+	}
 	nonce, _ := ev.Request.Context().Value(nonceKey{}).(string)
 	if nonce == "" {
-		// Not through this plugin's middleware, or no CSP configured: there is
-		// no header to match, so make the nonce and the header here.
+		// Answered outside this plugin's middleware — by a plugin listed before
+		// it, say — so no header names a nonce yet: make both here.
 		fresh, err := newNonce()
 		if err != nil {
 			return fmt.Errorf("secure: no randomness for a nonce: %w", err)
 		}
 		nonce = fresh
-		if p.opts.CSP != "" {
-			name := "Content-Security-Policy"
-			if p.opts.CSPReportOnly || p.dev {
-				name += "-Report-Only"
-			}
-			ev.Header.Set(name, strings.ReplaceAll(p.opts.CSP, "{nonce}", nonce))
+		name := "Content-Security-Policy"
+		if p.opts.CSPReportOnly || p.dev {
+			name += "-Report-Only"
 		}
+		ev.Header.Set(name, strings.ReplaceAll(p.opts.CSP, "{nonce}", nonce))
 	}
 	ev.Body = bytes.ReplaceAll(ev.Body, []byte(p.marker), []byte(nonce))
 	ev.Personal = true

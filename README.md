@@ -63,6 +63,10 @@ document pass straight through. (Before v0.1.5, with a policy set, every request
 lost its `If-None-Match` and `If-Modified-Since`, and nothing behind the plugin
 could answer `304`.)
 
+With no policy, or a policy without `{nonce}`, there is no nonce to name: the
+`nonce` attribute is removed, as in a static build, and the page stays an ordinary
+cacheable one with a stable `ETag`.
+
 Version 0.2.0 requires collage v0.43.0, which added `PersonaliseHook`.
 
 ## Static builds
@@ -81,6 +85,13 @@ In development the policy is sent as `Content-Security-Policy-Report-Only`
 whatever `CSPReportOnly` says: collage's live-reload script is an inline script
 without a nonce, and a policy that blocked it would stop the page reloading.
 Violations still appear in the browser's console.
+
+## Known limits
+
+The placeholder is random per process, so a page a disk cache kept across a
+restart still carries the old process's placeholder, served as the nonce
+attribute and matching no header until the entry expires: clear a disk cache on
+deploy.
 
 ## Configuration
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -347,5 +348,103 @@ func TestNonce_Head(t *testing.T) {
 	}
 	if cc := resp.Header.Get("Cache-Control"); cc != "private, no-store" {
 		t.Errorf("HEAD Cache-Control %q, want what GET sends", cc)
+	}
+}
+
+// With no nonce to name in a policy — none configured, or one without "{nonce}"
+// — a nonce on the page means nothing: it is removed as a static render removes
+// it, and the page stays an ordinary cacheable one with a stable ETag.
+func TestNoPolicyNonceStripsTheMarker(t *testing.T) {
+	for name, csp := range map[string]string{"no policy": "", "policy without {nonce}": "script-src 'self'"} {
+		for _, tmpl := range []string{"p.html", "nf.html"} {
+			t.Run(name+" "+tmpl, func(t *testing.T) {
+				app, err := collage.New(&collage.Config{
+					Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+					Template: collage.TemplateConfig{FS: fstest.MapFS{
+						"t/p.html":  {Data: []byte(`<html><body><script nonce="{{cspNonce}}">go()</script></body></html>`)},
+						"t/nf.html": {Data: []byte(`<html><body><script nonce='{{cspNonce}}'>go()</script></body></html>`)},
+					}, Root: "t"},
+					Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
+					Plugins: []collage.Plugin{secure.New(secure.Options{CSP: csp})},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", tmpl).Build()).WithPath("en", "/").Static().Build()); err != nil {
+					t.Fatal(err)
+				}
+				if err := app.Start(); err != nil {
+					t.Fatal(err)
+				}
+				first := do(app, httptest.NewRequest(http.MethodGet, "/", nil))
+				second := do(app, httptest.NewRequest(http.MethodGet, "/", nil))
+				for _, rec := range []*httptest.ResponseRecorder{first, second} {
+					body := rec.Body.String()
+					if rec.Code != http.StatusOK || strings.Contains(body, "nonce") || !strings.Contains(body, "<script>go()</script>") {
+						t.Fatalf("status %d body %q: want the script without a nonce", rec.Code, body)
+					}
+					if cc := rec.Header().Get("Cache-Control"); cc == "private, no-store" {
+						t.Errorf("Cache-Control %q: a page with no nonce is not personal", cc)
+					}
+				}
+				etag := first.Header().Get("ETag")
+				if etag == "" || second.Header().Get("ETag") != etag {
+					t.Errorf("ETags %q, %q: want one stable ETag", etag, second.Header().Get("ETag"))
+				}
+				r := httptest.NewRequest(http.MethodGet, "/", nil)
+				r.Header.Set("If-None-Match", etag)
+				if rec := do(app, r); rec.Code != http.StatusNotModified {
+					t.Errorf("revalidation = %d, want 304", rec.Code)
+				}
+			})
+		}
+	}
+}
+
+// gate answers /gate with a 403 from its own middleware, listed before secure's,
+// so the error page is answered outside secure's middleware.
+type gate struct{}
+
+func (gate) Name() string                   { return "test/gate" }
+func (gate) Version() string                { return "0" }
+func (gate) Shutdown(context.Context) error { return nil }
+func (gate) Init(_ context.Context, h collage.Host) error {
+	return h.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/gate" {
+				h.ServeStatus(w, r, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+}
+
+// A page answered before secure's middleware ran has no nonce in its request:
+// the hook makes one and names it in the header itself.
+func TestNonce_OutsideTheMiddleware(t *testing.T) {
+	app, err := collage.New(&collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{
+			"t/err.html": {Data: []byte(`<p>err</p><script nonce="{{cspNonce}}">e()</script>`)},
+		}, Root: "t"},
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Plugins: []collage.Plugin{gate{}, secure.New(secure.Options{CSP: "script-src 'nonce-{nonce}'"})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RegisterErrorPage(collage.NewPage("err").WithContent(collage.NewFragment("err", "err.html").Build()).Build()); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	rec, body, header := fetch(t, app.Handler(), http.MethodGet, "/gate")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403", rec.Code)
+	}
+	if m := nonceIn.FindStringSubmatch(body); m == nil || header == "" || m[1] != header {
+		t.Errorf("body nonce %v, header nonce %q: want equal", m, header)
 	}
 }
