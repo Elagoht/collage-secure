@@ -94,7 +94,8 @@ type Options struct {
 	// instance, kept from another process carries a placeholder this one does
 	// not recognise. In configuration it is "key", hex-encoded.
 	Key []byte `json:"-"`
-	// KeyHex is Key, hex-encoded, as configuration carries it.
+	// KeyHex is Key, hex-encoded, as configuration carries it. When both are set,
+	// KeyHex wins.
 	KeyHex string `json:"key"`
 }
 
@@ -127,7 +128,7 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	if o.KeyHex != "" {
 		key, err := hex.DecodeString(o.KeyHex)
 		if err != nil {
-			return fmt.Errorf("secure: key: %w", err)
+			return errors.New("secure: key is not valid hex")
 		}
 		o.Key = key
 	}

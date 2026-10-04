@@ -571,11 +571,26 @@ func TestKey_Invalid(t *testing.T) {
 				Plugins:  []collage.Plugin{secure.New(opts)},
 			})
 			if err == nil {
-				err = app.Start()
+				t.Fatalf("collage.New = %v, %v; want the key error from Configure", app, err)
 			}
-			if err == nil || !strings.Contains(err.Error(), "secure: key") {
+			if !strings.Contains(err.Error(), "secure: key") {
 				t.Errorf("err = %v, want a secure key error", err)
 			}
 		})
+	}
+}
+
+// A key that is not hex is refused without a byte of it in the message.
+func TestKey_BadHexErrorHidesTheKey(t *testing.T) {
+	_, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>hi</p>`)}}, Root: "t"},
+		Plugins:  []collage.Plugin{secure.New(secure.Options{KeyHex: "qqqq"})},
+	})
+	if err == nil {
+		t.Fatal("the application was built")
+	}
+	if !strings.Contains(err.Error(), "key is not valid hex") || strings.Contains(err.Error(), "q") {
+		t.Errorf("err = %q", err)
 	}
 }
