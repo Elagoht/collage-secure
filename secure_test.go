@@ -1,6 +1,7 @@
 package secure_test
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -14,7 +15,6 @@ import (
 	"testing/fstest"
 	"time"
 
-	compress "github.com/Elagoht/collage-compress"
 	secure "github.com/Elagoht/collage-secure"
 	"github.com/Elagoht/collage/pkg/collage"
 )
@@ -237,7 +237,7 @@ func TestWildcardDoesNotRevalidateANoncePage(t *testing.T) {
 
 var nonceIn = regexp.MustCompile(`nonce="([^"]*)"`)
 
-// nonceSite is a cached page with an inline script, behind secure and compress in
+// nonceSite is a cached page with an inline script, behind secure and gzipPlugin in
 // the given order.
 func nonceSite(t *testing.T, plugins ...collage.Plugin) http.Handler {
 	t.Helper()
@@ -286,11 +286,53 @@ func fetch(t *testing.T, h http.Handler, method, path string) (*httptest.Respons
 	return rec, body, header
 }
 
+// gzipPlugin stands in for a compression plugin, stdlib only: its middleware
+// buffers a text/html response and, when the request accepts gzip, sends it
+// compressed with Content-Encoding and Vary set and no Content-Length. Placed
+// inside secure, it leaves secure plain bytes; placed outside, it hands gzip
+// bytes to whatever secure writes through, which a body-buffering secure would
+// have mangled.
+type gzipPlugin struct{}
+
+func (gzipPlugin) Name() string                   { return "test/gzip" }
+func (gzipPlugin) Version() string                { return "0.0.0" }
+func (gzipPlugin) Shutdown(context.Context) error { return nil }
+func (g gzipPlugin) Init(_ context.Context, host collage.Host) error {
+	return host.Use(g.middleware)
+}
+
+func (gzipPlugin) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		next.ServeHTTP(rec, r)
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		body := rec.Body.Bytes()
+		if strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") && len(body) > 0 {
+			var buf bytes.Buffer
+			zw := gzip.NewWriter(&buf)
+			_, _ = zw.Write(body)
+			_ = zw.Close()
+			body = buf.Bytes()
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Add("Vary", "Accept-Encoding")
+			w.Header().Del("Content-Length")
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(body)
+	})
+}
+
 func TestNonce_WithCompressInEitherOrder(t *testing.T) {
 	csp := secure.Options{CSP: "script-src 'nonce-{nonce}'"}
 	orders := map[string][]collage.Plugin{
-		"secure first":   {secure.New(csp), compress.New(compress.Options{})},
-		"compress first": {compress.New(compress.Options{}), secure.New(csp)},
+		"secure first":   {secure.New(csp), gzipPlugin{}},
+		"compress first": {gzipPlugin{}, secure.New(csp)},
 	}
 	for name, plugins := range orders {
 		t.Run(name, func(t *testing.T) {
