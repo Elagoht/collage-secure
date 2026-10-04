@@ -1,8 +1,10 @@
 package secure_test
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -11,6 +13,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	compress "github.com/Elagoht/collage-compress"
 	secure "github.com/Elagoht/collage-secure"
 	"github.com/Elagoht/collage/pkg/collage"
 )
@@ -107,8 +110,10 @@ func TestNonceSurvivesTheCache(t *testing.T) {
 			t.Errorf("nonce %q served twice", m[1])
 		}
 		seen[m[1]] = true
-		if rec.Header().Get("ETag") != "" || rec.Header().Get("Cache-Control") != "no-store" {
-			t.Errorf("a page with a nonce is revalidatable: ETag %q, Cache-Control %q", rec.Header().Get("ETag"), rec.Header().Get("Cache-Control"))
+		// The core recomputes a personal page's ETag from the body sent and
+		// answers it private, no-store: nothing stale can revalidate.
+		if rec.Header().Get("Cache-Control") != "private, no-store" {
+			t.Errorf("a page with a nonce is cacheable: Cache-Control %q", rec.Header().Get("Cache-Control"))
 		}
 	}
 }
@@ -218,13 +223,129 @@ func TestWildcardDoesNotRevalidateANoncePage(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: status %d, want 200", method, rec.Code)
 		}
-		if rec.Header().Get("ETag") != "" || rec.Header().Get("Cache-Control") != "no-store" {
-			t.Errorf("%s: ETag %q, Cache-Control %q", method, rec.Header().Get("ETag"), rec.Header().Get("Cache-Control"))
+		if rec.Header().Get("Cache-Control") != "private, no-store" {
+			t.Errorf("%s: Cache-Control %q", method, rec.Header().Get("Cache-Control"))
 		}
 		if method == http.MethodGet {
 			if m := nonceAttr.FindStringSubmatch(rec.Body.String()); m == nil || strings.Contains(m[1], "collage-csp-nonce") {
 				t.Errorf("page carries no nonce: %s", rec.Body.String())
 			}
 		}
+	}
+}
+
+var nonceIn = regexp.MustCompile(`nonce="([^"]*)"`)
+
+// nonceSite is a cached page with an inline script, behind secure and compress in
+// the given order.
+func nonceSite(t *testing.T, plugins ...collage.Plugin) http.Handler {
+	t.Helper()
+	app, err := collage.New(&collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(
+			`<html><body><script nonce="{{cspNonce}}">x()</script>` + strings.Repeat("<p>filler</p>", 300) + `</body></html>`)}}, Root: "t"},
+		Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Minute},
+		Plugins: plugins,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frag := collage.NewFragment("p", "p.html").Build()
+	if err := app.RegisterPage(collage.NewPage("home").WithContent(frag).WithPath("en", "/").
+		WithFragmentPath("en", "/live", frag).Static().Build()); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return app.Handler()
+}
+
+// fetch returns the decoded body and the nonce the CSP header carries.
+func fetch(t *testing.T, h http.Handler, method, path string) (*httptest.ResponseRecorder, string, string) {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Header().Get("Content-Encoding") == "gzip" && body != "" {
+		zr, err := gzip.NewReader(strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(zr)
+		body = string(b)
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	header := ""
+	if i := strings.Index(csp, "'nonce-"); i >= 0 {
+		header = strings.TrimSuffix(strings.SplitN(csp[i+len("'nonce-"):], "'", 2)[0], "'")
+	}
+	return rec, body, header
+}
+
+func TestNonce_WithCompressInEitherOrder(t *testing.T) {
+	csp := secure.Options{CSP: "script-src 'nonce-{nonce}'"}
+	orders := map[string][]collage.Plugin{
+		"secure first":   {secure.New(csp), compress.New(compress.Options{})},
+		"compress first": {compress.New(compress.Options{}), secure.New(csp)},
+	}
+	for name, plugins := range orders {
+		t.Run(name, func(t *testing.T) {
+			h := nonceSite(t, plugins...)
+			seen := map[string]bool{}
+			etags := map[string]bool{}
+			for range 2 { // the second is a cache hit
+				rec, body, header := fetch(t, h, http.MethodGet, "/")
+				m := nonceIn.FindStringSubmatch(body)
+				if m == nil || header == "" || m[1] != header {
+					t.Fatalf("body nonce %v, header nonce %q: want equal", m, header)
+				}
+				if strings.Contains(body, "collage-csp-nonce-") {
+					t.Fatalf("the marker reached the reader")
+				}
+				// The core recomputes a personal response's ETag from the body sent
+				// (spec): one per response, never a cached one.
+				if cc := rec.Header().Get("Cache-Control"); cc != "private, no-store" {
+					t.Errorf("Cache-Control %q, want private, no-store", cc)
+				}
+				seen[header] = true
+				etags[rec.Header().Get("ETag")] = true
+			}
+			if len(seen) != 2 || len(etags) != 2 {
+				t.Errorf("two responses shared a nonce or an ETag: nonces %v, etags %v", seen, etags)
+			}
+		})
+	}
+}
+
+func TestNonce_FragmentPath(t *testing.T) {
+	h := nonceSite(t, secure.New(secure.Options{CSP: "script-src 'nonce-{nonce}'"}))
+	_, body, header := fetch(t, h, http.MethodGet, "/live")
+	if m := nonceIn.FindStringSubmatch(body); m == nil || m[1] != header {
+		t.Errorf("fragment path nonce %v vs header %q", m, header)
+	}
+}
+
+// HEAD goes through a real server: the core writes the page body and leaves
+// dropping it for HEAD to net/http, which an httptest.ResponseRecorder does not do.
+func TestNonce_Head(t *testing.T) {
+	srv := httptest.NewServer(nonceSite(t, secure.New(secure.Options{CSP: "script-src 'nonce-{nonce}'"})))
+	defer srv.Close()
+	resp, err := http.Head(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || len(body) != 0 {
+		t.Errorf("HEAD = %d, body %q", resp.StatusCode, body)
+	}
+	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "'nonce-") || strings.Contains(csp, "{nonce}") {
+		t.Errorf("HEAD CSP = %q", csp)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "private, no-store" {
+		t.Errorf("HEAD Cache-Control %q, want what GET sends", cc)
 	}
 }

@@ -16,11 +16,14 @@
 // A nonce must be new on every response, and collage serves one rendered page to
 // many readers from its cache. So {{cspNonce}} does not render a nonce: it renders
 // a placeholder, and what is cached carries the placeholder. On the way out, the
-// plugin's middleware puts a fresh nonce in its place and the same nonce in the
-// header — the way collage itself puts each reader's forgery token into a cached
-// form. A page carrying a nonce is answered without an ETag, since a 304 would
-// have the browser keep the old page under the new header. Other responses keep
-// their validators and answer conditional requests as usual.
+// plugin's middleware makes a fresh nonce and names it in the header, and the
+// plugin's PersonaliseHook puts the same nonce in the placeholder's place — the
+// way collage itself puts each reader's forgery token into a cached form. That
+// happens after the cache and before any compressor, so the order plugins are
+// listed in does not matter. The core answers a page carrying a nonce private and
+// no-store, with an ETag of the body sent, since a 304 would have the browser
+// keep the old page under the new header. Other responses keep their validators
+// and answer conditional requests as usual.
 //
 // # Static builds
 //
@@ -100,7 +103,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.5" }
+func (p *Plugin) Version() string                { return "0.2.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Configure reads the configuration and adds {{cspNonce}}.
@@ -167,17 +170,15 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set(name, strings.ReplaceAll(p.opts.CSP, "{nonce}", nonce))
 		// A page answered 304 would be kept by the browser with the nonce it was
-		// first sent, under this response's header. A page carrying a nonce is
-		// never sent its ETag (finish), and collage does not revalidate pages by
-		// date, so the one validator that could match it is "*", which matches
-		// anything. That alone goes; every other conditional request reaches the
-		// handler, so a feed, a document or a mounted file still answers 304.
+		// first sent, under this response's header. The core recomputes a
+		// personalised page's ETag from the body sent, so only "*", which matches
+		// anything, could revalidate it. That alone goes; every other conditional
+		// request reaches the handler, so a feed, a document or a mounted file
+		// still answers 304.
 		if strings.TrimSpace(r.Header.Get("If-None-Match")) == "*" {
 			r.Header.Del("If-None-Match")
 		}
-		rw := &nonceWriter{ResponseWriter: w, marker: []byte(p.marker), nonce: []byte(nonce), head: r.Method == http.MethodHead}
-		next.ServeHTTP(rw, r)
-		rw.finish()
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), nonceKey{}, nonce)))
 	})
 }
 
@@ -239,76 +240,35 @@ func newNonce() (string, error) {
 	return base64.RawStdEncoding.EncodeToString(raw[:]), nil
 }
 
-// nonceWriter holds back an HTML body to put the nonce in place of the marker.
-// Anything else — an event stream, an image, JSON — passes straight through, and
-// so does a hijacked connection.
-type nonceWriter struct {
-	http.ResponseWriter
-	marker, nonce []byte
-	head          bool
-	status        int
-	buffering     bool
-	decided       bool
-	body          bytes.Buffer
-}
+type nonceKey struct{}
 
-func (w *nonceWriter) decide() {
-	if w.decided {
-		return
+// OnPersonalise puts this response's nonce where {{cspNonce}} left the marker.
+// It runs after collage's page cache and inside every middleware, so before a
+// compressor: the order plugins are listed in no longer matters.
+func (p *Plugin) OnPersonalise(_ context.Context, ev *collage.PersonaliseEvent) error {
+	if p.marker == "" || !bytes.Contains(ev.Body, []byte(p.marker)) {
+		return nil
 	}
-	w.decided = true
-	w.buffering = strings.HasPrefix(w.Header().Get("Content-Type"), "text/html")
-}
-
-func (w *nonceWriter) WriteHeader(status int) {
-	w.decide()
-	if w.buffering {
-		w.status = status
-		return
-	}
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *nonceWriter) Write(b []byte) (int, error) {
-	w.decide()
-	if w.buffering {
-		return w.body.Write(b)
-	}
-	return w.ResponseWriter.Write(b)
-}
-
-// Flush passes a flush through when nothing is held back.
-func (w *nonceWriter) Flush() {
-	if !w.buffering {
-		if f, ok := w.ResponseWriter.(http.Flusher); ok {
-			f.Flush()
+	nonce, _ := ev.Request.Context().Value(nonceKey{}).(string)
+	if nonce == "" {
+		// Not through this plugin's middleware, or no CSP configured: there is
+		// no header to match, so make the nonce and the header here.
+		fresh, err := newNonce()
+		if err != nil {
+			return fmt.Errorf("secure: no randomness for a nonce: %w", err)
+		}
+		nonce = fresh
+		if p.opts.CSP != "" {
+			name := "Content-Security-Policy"
+			if p.opts.CSPReportOnly || p.dev {
+				name += "-Report-Only"
+			}
+			ev.Header.Set(name, strings.ReplaceAll(p.opts.CSP, "{nonce}", nonce))
 		}
 	}
+	ev.Body = bytes.ReplaceAll(ev.Body, []byte(p.marker), []byte(nonce))
+	ev.Personal = true
+	return nil
 }
 
-// Unwrap lets http.ResponseController reach the connection: a stream's write
-// deadline, a WebSocket's hijack.
-func (w *nonceWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-func (w *nonceWriter) finish() {
-	if !w.buffering {
-		return
-	}
-	body := w.body.Bytes()
-	if bytes.Contains(body, w.marker) {
-		body = bytes.ReplaceAll(body, w.marker, w.nonce)
-		h := w.Header()
-		h.Del("ETag")
-		h.Del("Last-Modified")
-		h.Set("Cache-Control", "no-store")
-	}
-	if !w.head {
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	}
-	status := w.status
-	if status == 0 {
-		status = http.StatusOK
-	}
-	w.ResponseWriter.WriteHeader(status)
-	_, _ = w.ResponseWriter.Write(body)
-}
+var _ collage.PersonaliseHook = (*Plugin)(nil)

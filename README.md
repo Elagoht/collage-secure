@@ -41,20 +41,29 @@ puts the same one on an inline script or style:
 
 A nonce must be new on every response, and collage serves one rendered page to
 many readers from its cache. So `{{cspNonce}}` renders a placeholder, and the cached
-page carries the placeholder; the plugin's middleware puts a fresh nonce in its
-place on the way out, and names the same nonce in the header. It is how collage
-itself puts each reader's forgery token into a cached form.
+page carries the placeholder. The plugin's middleware makes a fresh nonce and names
+it in the header; the plugin's `PersonaliseHook` puts the same nonce in the
+placeholder's place. It is how collage itself puts each reader's forgery token into
+a cached form.
 
-A page carrying a nonce is sent with `Cache-Control: no-store` and no `ETag` or
-`Last-Modified`, so the browser holds no validator to revalidate it with: a `304`
-would have it keep the page with its old nonce under the new header, and every
-inline script would be blocked. `If-None-Match: *`, which matches any page, is
-dropped from requests. Every other conditional request reaches its handler as
-sent, so a handler's own `ETag`, a document, a mounted file still answer `304`.
-Only HTML is held back to put the nonce in; an event stream, an image, a JSON
-document pass straight through. (Before v0.1.5, with a policy set, every request lost its
-`If-None-Match` and `If-Modified-Since`, and nothing behind the plugin could
-answer `304`.)
+That happens after collage's page cache and before any compressor, so the order
+plugins are listed in does not matter. (Before v0.2.0 the nonce went in from a
+middleware that buffered the page, and with secure listed before `elagoht/compress`
+the placeholder was left inside the gzip body: the header's nonce matched nothing
+and the browser blocked every inline script.)
+
+The core answers a page carrying a nonce `Cache-Control: private, no-store`, with
+an `ETag` of the body actually sent, so nothing can revalidate a stale page: a
+`304` would have the browser keep the page with its old nonce under the new header,
+and every inline script would be blocked. `If-None-Match: *`, which matches any
+page, is dropped from requests. Every other conditional request reaches its handler
+as sent, so a handler's own `ETag`, a document, a mounted file still answer `304`.
+Only an HTML page or fragment is rewritten; an event stream, an image, a JSON
+document pass straight through. (Before v0.1.5, with a policy set, every request
+lost its `If-None-Match` and `If-Modified-Since`, and nothing behind the plugin
+could answer `304`.)
+
+Version 0.2.0 requires collage v0.43.0, which added `PersonaliseHook`.
 
 ## Static builds
 
