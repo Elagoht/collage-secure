@@ -88,10 +88,17 @@ Violations still appear in the browser's console.
 
 ## Known limits
 
-The placeholder is random per process, so a page a disk cache kept across a
-restart still carries the old process's placeholder, served as the nonce
-attribute and matching no header until the entry expires: clear a disk cache on
-deploy.
+Without a `key`, the placeholder is random per process, so a page a disk cache
+kept across a restart, or one instance cached for another sharing the cache,
+still carries the other process's placeholder: it is served as the `nonce`
+attribute and matches no header until the entry expires. Set `key`, and the
+placeholder is derived from it and is the same in every process.
+
+`key` is at least 32 random bytes, the same on every instance and across
+restarts, hex-encoded in configuration (`openssl rand -hex 32`), or `Options.Key`
+as bytes. A key shorter than that, or not hex, is an error at start. It is also
+what keeps the placeholder unguessable, so text a visitor supplied cannot contain
+it; keep it secret.
 
 ## Configuration
 
@@ -103,6 +110,7 @@ deploy.
     "hsts": 63072000,
     "hstsSubdomains": true,
     "frameOptions": "DENY",
+    "key": "<64 hex characters: openssl rand -hex 32>",
     "permissionsPolicy": "camera=(), microphone=(), geolocation=()"
   }
 }

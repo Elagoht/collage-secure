@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -488,5 +489,93 @@ func TestNonce_OutsideTheMiddleware(t *testing.T) {
 	}
 	if m := nonceIn.FindStringSubmatch(body); m == nil || header == "" || m[1] != header {
 		t.Errorf("body nonce %v, header nonce %q: want equal", m, header)
+	}
+}
+
+// diskSite is an application over a disk cache in dir, as one instance, or one
+// run of a process, among those sharing it.
+func diskSite(t *testing.T, dir string, opts secure.Options) http.Handler {
+	t.Helper()
+	app, err := collage.New(&collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(
+			`<html><body><script nonce="{{cspNonce}}">x()</script></body></html>`)}}, Root: "t"},
+		Cache:   collage.CacheConfig{Enabled: true, Type: "disk", Dir: dir, Version: "v1", DefaultTTL: time.Hour},
+		Plugins: []collage.Plugin{secure.New(opts)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("p", "p.html").Build()).WithPath("en", "/").Static().Build()); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return app.Handler()
+}
+
+func TestKey_PlaceholderSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	opts := secure.Options{CSP: "script-src 'nonce-{nonce}'", Key: bytes.Repeat([]byte{7}, 32)}
+	// The second site serves what the first cached, as a new process or another
+	// instance sharing the cache would.
+	for i, h := range []http.Handler{diskSite(t, dir, opts), diskSite(t, dir, opts)} {
+		_, body, nonce := fetch(t, h, http.MethodGet, "/")
+		m := nonceAttr.FindStringSubmatch(body)
+		if m == nil || strings.Contains(body, "collage-csp-nonce") {
+			t.Fatalf("site %d: page carries no nonce: %s", i, body)
+		}
+		if nonce != m[1] {
+			t.Errorf("site %d: header names nonce %q, the page carries %q", i, nonce, m[1])
+		}
+	}
+}
+
+func TestKey_HexInConfigurationAndOptionsAgree(t *testing.T) {
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{9}, 32)
+	a := diskSite(t, dir, secure.Options{CSP: "script-src 'nonce-{nonce}'", Key: key})
+	b := diskSite(t, dir, secure.Options{CSP: "script-src 'nonce-{nonce}'", KeyHex: hex.EncodeToString(key)})
+	for _, h := range []http.Handler{a, b} {
+		_, body, nonce := fetch(t, h, http.MethodGet, "/")
+		m := nonceAttr.FindStringSubmatch(body)
+		if m == nil || nonce != m[1] {
+			t.Errorf("body %q, header nonce %q", body, nonce)
+		}
+	}
+}
+
+// Without a key the placeholder is random per process, as before: a page cached
+// by another process carries a placeholder this one does not know.
+func TestNoKey_PlaceholderIsPerProcess(t *testing.T) {
+	dir := t.TempDir()
+	opts := secure.Options{CSP: "script-src 'nonce-{nonce}'"}
+	fetch(t, diskSite(t, dir, opts), http.MethodGet, "/")
+	_, body, _ := fetch(t, diskSite(t, dir, opts), http.MethodGet, "/")
+	if !strings.Contains(body, "collage-csp-nonce-") {
+		t.Errorf("a second process recognised the first's placeholder without a key: %s", body)
+	}
+}
+
+func TestKey_Invalid(t *testing.T) {
+	for name, opts := range map[string]secure.Options{
+		"short":     {Key: []byte("too short")},
+		"bad hex":   {KeyHex: "zz" + strings.Repeat("00", 31)},
+		"short hex": {KeyHex: "abcd"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			app, err := collage.New(&collage.Config{
+				Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+				Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>hi</p>`)}}, Root: "t"},
+				Plugins:  []collage.Plugin{secure.New(opts)},
+			})
+			if err == nil {
+				err = app.Start()
+			}
+			if err == nil || !strings.Contains(err.Error(), "secure: key") {
+				t.Errorf("err = %v, want a secure key error", err)
+			}
+		})
 	}
 }

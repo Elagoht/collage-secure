@@ -54,6 +54,10 @@
         "type": "boolean",
         "description": "HSTSSubdomains and HSTSPreload add includeSubDomains and preload."
       },
+      "key": {
+        "type": "string",
+        "description": "KeyHex is Key, hex-encoded, as configuration carries it."
+      },
       "noSniff": {
         "type": "boolean",
         "description": "NoSniff turns X-Content-Type-Options: nosniff off when false is set in configuration; it is on by default."

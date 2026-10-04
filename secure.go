@@ -37,9 +37,12 @@ package secure
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -85,6 +88,14 @@ type Options struct {
 	// NoSniff turns X-Content-Type-Options: nosniff off when false is set in
 	// configuration; it is on by default.
 	NoSniff *bool `json:"noSniff"`
+	// Key makes the nonce placeholder the same in every process: at least 32
+	// random bytes, the same on every instance and across restarts. Unset, the
+	// placeholder is random per process, and a page a disk cache, or another
+	// instance, kept from another process carries a placeholder this one does
+	// not recognise. In configuration it is "key", hex-encoded.
+	Key []byte `json:"-"`
+	// KeyHex is Key, hex-encoded, as configuration carries it.
+	KeyHex string `json:"key"`
 }
 
 // Plugin sends the headers.
@@ -103,7 +114,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.2.0" }
+func (p *Plugin) Version() string                { return "0.2.1" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Configure reads the configuration and adds {{cspNonce}}.
@@ -112,13 +123,35 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 		return err
 	}
 	p.dev = host.DevMode()
-	// Random per process, like collage's own forgery marker: a page rendering
-	// text a visitor supplied cannot contain it, and so cannot be handed a nonce.
-	var raw [12]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Errorf("secure: %w", err)
+	o := &p.opts
+	if o.KeyHex != "" {
+		key, err := hex.DecodeString(o.KeyHex)
+		if err != nil {
+			return fmt.Errorf("secure: key: %w", err)
+		}
+		o.Key = key
 	}
-	p.marker = "collage-csp-nonce-" + hex.EncodeToString(raw[:])
+	if len(o.Key) > 0 && len(o.Key) < 32 {
+		return errors.New("secure: key: the key must be at least 32 bytes")
+	}
+	if len(o.Key) > 0 {
+		// Derived from the key, like collage's own forgery marker: a page cached
+		// by one process is served by the next, or by another instance, which must
+		// recognise the placeholder; and nobody without the key can plant it in
+		// text a visitor supplied.
+		mac := hmac.New(sha256.New, o.Key)
+		mac.Write([]byte("csp-nonce-marker"))
+		p.marker = "collage-csp-nonce-" + hex.EncodeToString(mac.Sum(nil))[:32]
+	} else {
+		// Random per process: a page rendering text a visitor supplied cannot
+		// contain it, and so cannot be handed a nonce. A page a disk cache kept
+		// from another process carries another placeholder: set a key.
+		var raw [12]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return fmt.Errorf("secure: %w", err)
+		}
+		p.marker = "collage-csp-nonce-" + hex.EncodeToString(raw[:])
+	}
 	m := regexp.QuoteMeta(p.marker)
 	p.nonceAttr = regexp.MustCompile(`\s+nonce\s*=\s*(?:"` + m + `"|'` + m + `'|` + m + `\b)`)
 	return host.AddTemplateFunc("cspNonce", func() string { return p.marker })
