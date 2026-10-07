@@ -115,12 +115,13 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.2.1" }
+func (p *Plugin) Version() string                { return "0.2.3" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Configure reads the configuration and adds {{cspNonce}}.
 func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
-	if err := host.Config(&p.opts); err != nil {
+	var err error
+	if p.opts, err = collage.PluginConfig(host, p.opts); err != nil {
 		return err
 	}
 	p.dev = host.DevMode()
