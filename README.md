@@ -79,6 +79,9 @@ policy is configured. Allow those inline scripts in the host's own policy — by
 hash, for instance. (Before v0.1.2 the placeholder, `collage-csp-nonce-…`, was
 left in the exported HTML.)
 
+From collage v0.54.0, an exported nonce page keeps its strategy's `Cache-Control`,
+not `private, no-store`.
+
 ## Development
 
 In development the policy is sent as `Content-Security-Policy-Report-Only`
