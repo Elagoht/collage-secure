@@ -56,7 +56,7 @@
       },
       "key": {
         "type": "string",
-        "description": "KeyHex is Key, hex-encoded, as configuration carries it."
+        "description": "KeyHex is Key, hex-encoded, as configuration carries it. When both are set, KeyHex wins."
       },
       "noSniff": {
         "type": "boolean",
