@@ -123,9 +123,13 @@ it; keep it secret.
 }
 ```
 
-## Changes
+## Changed in v0.3.1
 
-### v0.3.0
+- README headings follow the "Changed in vX" convention; tests build their sites with
+  collagetest. No behaviour changes.
+- Requires collage v0.61.2.
+
+## Changed in v0.3.0
 
 - `noSniff` (`Options.NoSniff *bool`) is replaced by `contentTypeOptions`
   (`Options.ContentTypeOptions string`): default `nosniff`, `"-"` omits it, as for
@@ -140,12 +144,12 @@ it; keep it secret.
   `unknown key "…"`.
 - Requires collage v0.61.0.
 
-### v0.2.5
+## Changed in v0.2.5
 
 - Built against collage v0.60.0, whose public API is sealed; no behaviour changes.
 - Requires collage v0.60.0.
 
-### v0.2.4
+## Changed in v0.2.4
 
 - collage.json is regenerated for editors: `keyHex` says it wins over `key`.
   Nothing else changes.

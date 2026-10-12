@@ -297,25 +297,18 @@ var nonceIn = regexp.MustCompile(`nonce="([^"]*)"`)
 // the given order.
 func nonceSite(t *testing.T, plugins ...collage.Plugin) http.Handler {
 	t.Helper()
-	app, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(
-			`<html><body><script nonce="{{cspNonce}}">x()</script>` + strings.Repeat("<p>filler</p>", 300) + `</body></html>`)}}, Root: "t"},
-		Cache:   collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Minute},
-		Plugins: plugins,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	frag := collage.NewFragment("p", "p.html").Build()
-	if err := app.RegisterPage(collage.NewPage("home").WithContent(frag).WithPath("en", "/").
-		WithFragmentPath("en", "/live", frag).Static().Build()); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.Start(); err != nil {
-		t.Fatal(err)
-	}
-	return app.Handler()
+	site := collagetest.NewSite(t,
+		collagetest.WithPlugins(plugins...),
+		collagetest.WithTemplates(map[string]string{"p.html": `<html><body><script nonce="{{cspNonce}}">x()</script>` + strings.Repeat("<p>filler</p>", 300) + `</body></html>`}),
+		collagetest.WithConfig(func(c *collage.Config) {
+			c.Cache = collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Minute}
+		}),
+		collagetest.WithoutHome(),
+		collagetest.WithRegister(collage.NewPage("home").WithContent(frag).WithPath("en", "/").
+			WithFragmentPath("en", "/live", frag).Static().Build()),
+	)
+	return site.App.Handler()
 }
 
 // fetch returns the decoded body and the nonce the CSP header carries.
@@ -551,23 +544,16 @@ func TestNonce_OutsideTheMiddleware(t *testing.T) {
 // run of a process, among those sharing it.
 func diskSite(t *testing.T, dir string, opts secure.Options) http.Handler {
 	t.Helper()
-	app, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(
-			`<html><body><script nonce="{{cspNonce}}">x()</script></body></html>`)}}, Root: "t"},
-		Cache:   collage.CacheConfig{Enabled: true, Type: "disk", Dir: dir, Version: "v1", DefaultTTL: time.Hour},
-		Plugins: []collage.Plugin{secure.New(opts)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("p", "p.html").Build()).WithPath("en", "/").Static().Build()); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.Start(); err != nil {
-		t.Fatal(err)
-	}
-	return app.Handler()
+	site := collagetest.NewSite(t,
+		collagetest.WithPlugins(secure.New(opts)),
+		collagetest.WithTemplates(map[string]string{"p.html": `<html><body><script nonce="{{cspNonce}}">x()</script></body></html>`}),
+		collagetest.WithConfig(func(c *collage.Config) {
+			c.Cache = collage.CacheConfig{Enabled: true, Type: "disk", Dir: dir, Version: "v1", DefaultTTL: time.Hour}
+		}),
+		collagetest.WithoutHome(),
+		collagetest.WithRegister(collage.NewPage("home").WithContent(collage.NewFragment("p", "p.html").Build()).WithPath("en", "/").Static().Build()),
+	)
+	return site.App.Handler()
 }
 
 func TestKey_PlaceholderSurvivesARestart(t *testing.T) {
