@@ -20,13 +20,38 @@ import (
 
 	secure "github.com/Elagoht/collage-secure"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
-func site(t *testing.T, dev bool, opts secure.Options) *collage.App {
+// siteOptions builds the test site: a cached static home page with a nonce on
+// its script, and a JSON document.
+func siteOptions(dev bool, opts secure.Options, extra ...collagetest.SiteOption) []collagetest.SiteOption {
+	return append([]collagetest.SiteOption{
+		collagetest.WithoutHome(),
+		collagetest.WithTemplates(map[string]string{
+			"p.html":  `<html><body><script nonce="{{cspNonce}}">go()</script></body></html>`,
+			"nf.html": `<html><body><script nonce='{{cspNonce}}'>go()</script></body></html>`,
+		}),
+		// Static: served from the cache after the first render, which is what the
+		// nonce has to survive.
+		collagetest.WithRegister(
+			collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Static().Build(),
+			collage.NewDocument("data", "application/json").AtRoot("/data.json").WithBody([]byte(`{"a":1}`)).Build(),
+		),
+		collagetest.WithConfig(func(c *collage.Config) {
+			c.DevMode = dev
+			c.Cache = collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour}
+		}),
+		collagetest.WithPlugins(secure.New(opts)),
+	}, extra...)
+}
+
+// unstartedSite is the same site built but not started, for a test that adds
+// what collagetest.NewSite cannot register: a not-found page, a handler, a mount.
+func unstartedSite(t *testing.T, opts secure.Options) *collage.App {
 	t.Helper()
 	app, err := collage.New(&collage.Config{
-		DevMode: dev,
-		Server:  collage.ServerConfig{Host: "localhost", Port: 3000},
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
 		Template: collage.TemplateConfig{FS: fstest.MapFS{
 			"t/p.html":  {Data: []byte(`<html><body><script nonce="{{cspNonce}}">go()</script></body></html>`)},
 			"t/nf.html": {Data: []byte(`<html><body><script nonce='{{cspNonce}}'>go()</script></body></html>`)},
@@ -37,15 +62,18 @@ func site(t *testing.T, dev bool, opts secure.Options) *collage.App {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Static: served from the cache after the first render, which is what the
-	// nonce has to survive.
-	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Static().Build()); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.RegisterDocument(collage.NewDocument("data", "application/json").AtRoot("/data.json").WithBody([]byte(`{"a":1}`)).Build()); err != nil {
+	if err := app.Register(
+		collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Static().Build(),
+		collage.NewDocument("data", "application/json").AtRoot("/data.json").WithBody([]byte(`{"a":1}`)).Build(),
+	); err != nil {
 		t.Fatal(err)
 	}
 	return app
+}
+
+func site(t *testing.T, dev bool, opts secure.Options, extra ...collagetest.SiteOption) *collage.App {
+	t.Helper()
+	return collagetest.NewSite(t, siteOptions(dev, opts, extra...)...).App
 }
 
 func do(app *collage.App, r *http.Request) *httptest.ResponseRecorder {
@@ -90,6 +118,25 @@ func TestHSTSOnlyOverTLS(t *testing.T) {
 }
 
 var nonceAttr = regexp.MustCompile(`nonce="([^"]+)"`)
+
+// X-Forwarded-Proto is believed only from a trusted proxy: a client sending it
+// itself, past Server.TrustedProxies, gets no HSTS.
+func TestHSTSIgnoresAnUntrustedForwardedProto(t *testing.T) {
+	app := site(t, false, secure.Options{}, collagetest.WithConfig(func(c *collage.Config) {
+		c.Server.TrustedProxies = []string{"10.0.0.1"}
+	}))
+	r := httptest.NewRequest(http.MethodGet, "/", nil) // from 192.0.2.1, not a trusted proxy
+	r.Header.Set("X-Forwarded-Proto", "https")
+	if got := do(app, r).Header().Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("HSTS = %q from an untrusted X-Forwarded-Proto, want none", got)
+	}
+	r = httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "10.0.0.1:1234"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	if got := do(app, r).Header().Get("Strict-Transport-Security"); got == "" {
+		t.Error("no HSTS behind a trusted TLS-terminating proxy")
+	}
+}
 
 // Every response gets its own nonce, in the header and on the page, though the
 // page itself comes from the cache.
@@ -143,7 +190,7 @@ func TestDevelopmentOnlyReports(t *testing.T) {
 // would reach the file — and a file cannot carry a per-response nonce at all.
 // The attribute goes; the script stays.
 func TestStaticRenderCarriesNoPlaceholder(t *testing.T) {
-	app := site(t, false, secure.Options{CSP: "script-src 'nonce-{nonce}'"})
+	app := unstartedSite(t, secure.Options{CSP: "script-src 'nonce-{nonce}'"})
 	notFound := collage.NewPage("not-found").WithContent(collage.NewFragment("nf", "nf.html").Build()).Build()
 	if err := app.RegisterPage(notFound); err != nil {
 		t.Fatal(err)
@@ -185,7 +232,7 @@ func TestStaticRenderCarriesNoPlaceholder(t *testing.T) {
 // the plugin is revalidated as usual: a handler's own ETag, a document's, a
 // mounted file's Last-Modified.
 func TestOthersAnswerConditionalRequests(t *testing.T) {
-	app := site(t, false, secure.Options{CSP: "default-src 'self'"})
+	app := unstartedSite(t, secure.Options{CSP: "default-src 'self'"})
 	if err := app.Handle("/feed", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
 		w.Header().Set("ETag", `"v1"`)
@@ -540,11 +587,12 @@ func TestKey_PlaceholderSurvivesARestart(t *testing.T) {
 	}
 }
 
-func TestKey_HexInConfigurationAndOptionsAgree(t *testing.T) {
+func TestKey_EnvAndOptionsAgree(t *testing.T) {
 	dir := t.TempDir()
 	key := bytes.Repeat([]byte{9}, 32)
+	t.Setenv("SECURE_TEST_KEY", hex.EncodeToString(key))
 	a := diskSite(t, dir, secure.Options{CSP: "script-src 'nonce-{nonce}'", Key: key})
-	b := diskSite(t, dir, secure.Options{CSP: "script-src 'nonce-{nonce}'", KeyHex: hex.EncodeToString(key)})
+	b := diskSite(t, dir, secure.Options{CSP: "script-src 'nonce-{nonce}'", KeyEnv: "SECURE_TEST_KEY"})
 	for _, h := range []http.Handler{a, b} {
 		_, body, nonce := fetch(t, h, http.MethodGet, "/")
 		m := nonceAttr.FindStringSubmatch(body)
@@ -567,21 +615,17 @@ func TestNoKey_PlaceholderIsPerProcess(t *testing.T) {
 }
 
 func TestKey_Invalid(t *testing.T) {
+	t.Setenv("SECURE_TEST_BAD_HEX", "zz"+strings.Repeat("00", 31))
+	t.Setenv("SECURE_TEST_SHORT_HEX", "abcd")
 	for name, opts := range map[string]secure.Options{
 		"short":     {Key: []byte("too short")},
-		"bad hex":   {KeyHex: "zz" + strings.Repeat("00", 31)},
-		"short hex": {KeyHex: "abcd"},
+		"bad hex":   {KeyEnv: "SECURE_TEST_BAD_HEX"},
+		"short hex": {KeyEnv: "SECURE_TEST_SHORT_HEX"},
+		"unset env": {KeyEnv: "SECURE_TEST_UNSET"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			app, err := collage.New(&collage.Config{
-				Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-				Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>hi</p>`)}}, Root: "t"},
-				Plugins:  []collage.Plugin{secure.New(opts)},
-			})
-			if err == nil {
-				t.Fatalf("collage.New = %v, %v; want the key error from Configure", app, err)
-			}
-			if !strings.Contains(err.Error(), "secure: key") {
+			_, err := collagetest.TrySite(t, collagetest.WithPlugins(secure.New(opts)))
+			if err == nil || !strings.Contains(err.Error(), "secure: key") {
 				t.Errorf("err = %v, want a secure key error", err)
 			}
 		})
@@ -590,15 +634,35 @@ func TestKey_Invalid(t *testing.T) {
 
 // A key that is not hex is refused without a byte of it in the message.
 func TestKey_BadHexErrorHidesTheKey(t *testing.T) {
-	_, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>hi</p>`)}}, Root: "t"},
-		Plugins:  []collage.Plugin{secure.New(secure.Options{KeyHex: "qqqq"})},
-	})
+	t.Setenv("SECURE_TEST_Q_KEY", "qqqq")
+	_, err := collagetest.TrySite(t, collagetest.WithPlugins(secure.New(secure.Options{KeyEnv: "SECURE_TEST_Q_KEY"})))
 	if err == nil {
-		t.Fatal("the application was built")
+		t.Fatal("the application started")
 	}
-	if !strings.Contains(err.Error(), "key is not valid hex") || strings.Contains(err.Error(), "q") {
+	if !strings.Contains(err.Error(), "not valid hex") || strings.Contains(err.Error(), "qqqq") {
 		t.Errorf("err = %q", err)
+	}
+}
+
+// Keys removed in v0.3.0 stop the application: key (the secret moved to an
+// environment variable, keyEnv) and noSniff (now contentTypeOptions).
+func TestRemovedKeys(t *testing.T) {
+	for k, v := range map[string]string{"key": `"` + strings.Repeat("00", 32) + `"`, "noSniff": "false"} {
+		_, err := collagetest.TrySite(t, siteOptions(false, secure.Options{},
+			collagetest.WithPluginConfig(secure.Name, `{"`+k+`":`+v+`}`))...)
+		if err == nil || !strings.Contains(err.Error(), `unknown key "`+k+`"`) {
+			t.Errorf("%s: start = %v, want an unknown key error", k, err)
+		}
+	}
+}
+
+// X-Content-Type-Options follows the "-" rule every other header does: a value
+// replaces nosniff, "-" removes the header, even the one collage itself sends.
+func TestContentTypeOptions(t *testing.T) {
+	for config, want := range map[string]string{`{}`: "nosniff", `{"contentTypeOptions":"-"}`: ""} {
+		app := site(t, false, secure.Options{}, collagetest.WithPluginConfig(secure.Name, config))
+		if got := do(app, httptest.NewRequest(http.MethodGet, "/", nil)).Header().Get("X-Content-Type-Options"); got != want {
+			t.Errorf("%s: X-Content-Type-Options = %q, want %q", config, got, want)
+		}
 	}
 }

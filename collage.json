@@ -27,6 +27,10 @@
     "type": "object",
     "description": "A collage plugin that sends the security headers a site should, and a Content-Security-Policy with per-request nonces.",
     "properties": {
+      "contentTypeOptions": {
+        "type": "string",
+        "description": "ContentTypeOptions is X-Content-Type-Options. Default \"nosniff\"."
+      },
       "crossOriginOpenerPolicy": {
         "type": "string",
         "description": "CrossOriginOpenerPolicy is Cross-Origin-Opener-Policy. Default \"same-origin\"."
@@ -45,7 +49,7 @@
       },
       "hsts": {
         "type": "integer",
-        "description": "HSTS is how long, in seconds, a browser should use only HTTPS for the site, sent on requests that arrived over TLS — directly or, by X-Forwarded-Proto, through a proxy. Default two years; negative sends none."
+        "description": "HSTS is how long, in seconds, a browser should use only HTTPS for the site, sent on requests that arrived over TLS — directly or, by X-Forwarded-Proto, through a proxy (collage.IsHTTPS: one listed in Server.TrustedProxies when any are). Default two years; negative sends none."
       },
       "hstsPreload": {
         "type": "boolean"
@@ -54,13 +58,9 @@
         "type": "boolean",
         "description": "HSTSSubdomains and HSTSPreload add includeSubDomains and preload."
       },
-      "key": {
+      "keyEnv": {
         "type": "string",
-        "description": "KeyHex is Key, hex-encoded, as configuration carries it. When both are set, KeyHex wins."
-      },
-      "noSniff": {
-        "type": "boolean",
-        "description": "NoSniff turns X-Content-Type-Options: nosniff off when false is set in configuration; it is on by default."
+        "description": "KeyEnv names the environment variable holding the key, hex-encoded. When set, it wins over Key, and an empty or non-hex variable is an error."
       },
       "permissionsPolicy": {
         "type": "string",

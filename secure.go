@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -70,7 +71,8 @@ type Options struct {
 	CSPReportOnly bool `json:"cspReportOnly"`
 	// HSTS is how long, in seconds, a browser should use only HTTPS for the site,
 	// sent on requests that arrived over TLS — directly or, by
-	// X-Forwarded-Proto, through a proxy. Default two years; negative sends none.
+	// X-Forwarded-Proto, through a proxy (collage.IsHTTPS: one listed in
+	// Server.TrustedProxies when any are). Default two years; negative sends none.
 	HSTS int `json:"hsts"`
 	// HSTSSubdomains and HSTSPreload add includeSubDomains and preload.
 	HSTSSubdomains bool `json:"hstsSubdomains"`
@@ -85,18 +87,17 @@ type Options struct {
 	// CrossOriginOpenerPolicy is Cross-Origin-Opener-Policy. Default
 	// "same-origin".
 	CrossOriginOpenerPolicy string `json:"crossOriginOpenerPolicy"`
-	// NoSniff turns X-Content-Type-Options: nosniff off when false is set in
-	// configuration; it is on by default.
-	NoSniff *bool `json:"noSniff"`
+	// ContentTypeOptions is X-Content-Type-Options. Default "nosniff".
+	ContentTypeOptions string `json:"contentTypeOptions"`
+	// KeyEnv names the environment variable holding the key, hex-encoded. When
+	// set, it wins over Key, and an empty or non-hex variable is an error.
+	KeyEnv string `json:"keyEnv"`
 	// Key makes the nonce placeholder the same in every process: at least 32
 	// random bytes, the same on every instance and across restarts. Unset, the
 	// placeholder is random per process, and a page a disk cache, or another
 	// instance, kept from another process carries a placeholder this one does
-	// not recognise. In configuration it is "key", hex-encoded.
+	// not recognise. Set from Go; configuration names it with KeyEnv.
 	Key []byte `json:"-"`
-	// KeyHex is Key, hex-encoded, as configuration carries it. When both are set,
-	// KeyHex wins.
-	KeyHex string `json:"key"`
 }
 
 // Plugin sends the headers.
@@ -115,7 +116,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.2.5" }
+func (p *Plugin) Version() string                { return "0.3.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Configure reads the configuration and adds {{cspNonce}}.
@@ -126,10 +127,14 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	}
 	p.dev = host.DevMode()
 	o := &p.opts
-	if o.KeyHex != "" {
-		key, err := hex.DecodeString(o.KeyHex)
+	if o.KeyEnv != "" {
+		raw := os.Getenv(o.KeyEnv)
+		if raw == "" {
+			return fmt.Errorf("secure: key: the environment variable %s is empty", o.KeyEnv)
+		}
+		key, err := hex.DecodeString(raw)
 		if err != nil {
-			return errors.New("secure: key is not valid hex")
+			return fmt.Errorf("secure: key: the environment variable %s is not valid hex", o.KeyEnv)
 		}
 		o.Key = key
 	}
@@ -226,20 +231,12 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 // static sets the headers that do not change between responses.
 func (p *Plugin) static(h http.Header, r *http.Request) {
 	o := p.opts
-	if o.NoSniff == nil || *o.NoSniff {
-		h.Set("X-Content-Type-Options", "nosniff")
-	} else {
-		// Turned off explicitly: remove it, in case the framework's own baseline
-		// (collage v0.39.0 sends nosniff by default) already set it — "off" has to
-		// mean off, not "off unless something below me set it".
-		h.Del("X-Content-Type-Options")
-	}
 	set := func(name, value, def string) {
 		switch value {
 		case "-":
 			// Omit deliberately: delete it, so it overrides a framework baseline
-			// that set it (X-Frame-Options is a collage v0.39.0 default), not just
-			// decline to set it ourselves.
+			// that set it (X-Frame-Options and nosniff are collage defaults), not
+			// just decline to set it ourselves.
 			h.Del(name)
 		case "":
 			if def != "" {
@@ -249,11 +246,12 @@ func (p *Plugin) static(h http.Header, r *http.Request) {
 			h.Set(name, value)
 		}
 	}
+	set("X-Content-Type-Options", o.ContentTypeOptions, "nosniff")
 	set("X-Frame-Options", o.FrameOptions, "SAMEORIGIN")
 	set("Referrer-Policy", o.ReferrerPolicy, "strict-origin-when-cross-origin")
 	set("Cross-Origin-Opener-Policy", o.CrossOriginOpenerPolicy, "same-origin")
 	set("Permissions-Policy", o.PermissionsPolicy, "")
-	if o.HSTS >= 0 && secureRequest(r) {
+	if o.HSTS >= 0 && collage.IsHTTPS(r) {
 		age := o.HSTS
 		if age == 0 {
 			age = int((2 * 365 * 24 * time.Hour).Seconds())
@@ -267,10 +265,6 @@ func (p *Plugin) static(h http.Header, r *http.Request) {
 		}
 		h.Set("Strict-Transport-Security", v)
 	}
-}
-
-func secureRequest(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func newNonce() (string, error) {

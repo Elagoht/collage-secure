@@ -11,14 +11,14 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.60.0 or later. Register it in `Config.Plugins`: it adds a
+Requires collage v0.61.0 or later. Register it in `Config.Plugins`: it adds a
 template function, which only a plugin registered there can.
 
 ## Headers
 
 | Header | Default | Option |
 | --- | --- | --- |
-| `X-Content-Type-Options` | `nosniff` | `NoSniff` |
+| `X-Content-Type-Options` | `nosniff` | `ContentTypeOptions` |
 | `X-Frame-Options` | `SAMEORIGIN` | `FrameOptions` |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` | `ReferrerPolicy` |
 | `Cross-Origin-Opener-Policy` | `same-origin` | `CrossOriginOpenerPolicy` |
@@ -26,9 +26,11 @@ template function, which only a plugin registered there can.
 | `Permissions-Policy` | none | `PermissionsPolicy` |
 | `Content-Security-Policy` | none | `CSP`, `CSPReportOnly` |
 
-`"-"` leaves a header out. HSTS is sent on a request that arrived over TLS, or
-through a proxy that says so with `X-Forwarded-Proto: https`; a negative `HSTS`
-sends none.
+`"-"` leaves a header out, even one collage itself sends by default. HSTS is sent
+on a request that arrived over TLS, or through a proxy that says so with
+`X-Forwarded-Proto: https` — believed only from a proxy listed in
+`Server.TrustedProxies` when any are (`collage.IsHTTPS`); a negative `HSTS` sends
+none.
 
 ## Nonces
 
@@ -91,15 +93,17 @@ Violations still appear in the browser's console.
 
 ## Known limits
 
-Without a `key`, the placeholder is random per process, so a page a disk cache
+Without a key, the placeholder is random per process, so a page a disk cache
 kept across a restart, or one instance cached for another sharing the cache,
 still carries the other process's placeholder: it is served as the `nonce`
-attribute and matches no header until the entry expires. Set `key`, and the
+attribute and matches no header until the entry expires. Set a key, and the
 placeholder is derived from it and is the same in every process.
 
-`key` is at least 32 random bytes, the same on every instance and across
-restarts, hex-encoded in configuration (`openssl rand -hex 32`), or `Options.Key`
-as bytes. A key shorter than that, or not hex, is an error at start. It is also
+The key is at least 32 random bytes, the same on every instance and across
+restarts. A secret never goes in `plugins-config.json`: `keyEnv` names the
+environment variable holding it, hex-encoded (`openssl rand -hex 32`), or
+`Options.Key` takes the bytes from Go; `keyEnv` wins when both are set. A key
+shorter than that, a variable that is empty or not hex, is an error at start. It is also
 what keeps the placeholder unguessable, so text a visitor supplied cannot contain
 it; keep it secret.
 
@@ -113,13 +117,28 @@ it; keep it secret.
     "hsts": 63072000,
     "hstsSubdomains": true,
     "frameOptions": "DENY",
-    "key": "<64 hex characters: openssl rand -hex 32>",
+    "keyEnv": "SECURE_KEY",
     "permissionsPolicy": "camera=(), microphone=(), geolocation=()"
   }
 }
 ```
 
 ## Changes
+
+### v0.3.0
+
+- `noSniff` (`Options.NoSniff *bool`) is replaced by `contentTypeOptions`
+  (`Options.ContentTypeOptions string`): default `nosniff`, `"-"` omits it, as for
+  every other header. Write `"contentTypeOptions": "-"` where you had
+  `"noSniff": false`.
+- `key` (hex in configuration, `Options.KeyHex`) is replaced by `keyEnv`, the name
+  of the environment variable holding the hex key. `Options.Key []byte` stays for
+  Go.
+- HSTS believes `X-Forwarded-Proto` only from `Server.TrustedProxies` when any are
+  listed (`collage.IsHTTPS`); it used to believe any client.
+- A configuration that still has `key` or `noSniff` stops the application with
+  `unknown key "…"`.
+- Requires collage v0.61.0.
 
 ### v0.2.5
 
