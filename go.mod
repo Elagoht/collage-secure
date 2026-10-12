@@ -8,6 +8,6 @@ module github.com/Elagoht/collage-secure
 
 go 1.26
 
-require github.com/Elagoht/collage v0.61.2
+require github.com/Elagoht/collage v0.61.4
 
 retract v0.2.2 // tagged at v0.2.1's commit by mistake

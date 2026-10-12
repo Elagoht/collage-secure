@@ -11,7 +11,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.61.0 or later. Register it in `Config.Plugins`: it adds a
+Requires collage v0.61.4 or later. Register it in `Config.Plugins`: it adds a
 template function, which only a plugin registered there can.
 
 ## Headers
@@ -127,7 +127,7 @@ it; keep it secret.
 
 - README headings follow the "Changed in vX" convention; tests build their sites with
   collagetest. No behaviour changes.
-- Requires collage v0.61.2.
+- Requires collage v0.61.4.
 
 ## Changed in v0.3.0
 
