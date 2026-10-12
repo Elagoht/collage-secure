@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -153,11 +155,17 @@ func TestStaticRenderCarriesNoPlaceholder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	missing, err := app.RenderNotFound(context.Background(), "en")
+	// The 404 page is rendered statically by a build, which is the public way to
+	// reach it without a request.
+	out := t.TempDir()
+	if _, err := collage.Build(context.Background(), app, collage.BuildOptions{OutDir: out}); err != nil {
+		t.Fatal(err)
+	}
+	missing, err := os.ReadFile(filepath.Join(out, "404.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, html := range map[string]string{"page": string(page.HTML), "404": string(missing.HTML)} {
+	for name, html := range map[string]string{"page": string(page.HTML), "404": string(missing)} {
 		if strings.Contains(html, "collage-csp-nonce") || strings.Contains(html, "nonce") {
 			t.Errorf("%s: static render carries a nonce: %s", name, html)
 		}
