@@ -3,6 +3,7 @@
   "name": "elagoht/secure",
   "description": "A collage plugin that sends the security headers a site should, and a Content-Security-Policy with per-request nonces.",
   "repository": "https://github.com/Elagoht/collage-secure",
+  "setup": "Works on its own: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Cross-Origin-Opener-Policy`, and HSTS over HTTPS.\nFor a Content-Security-Policy, set `\"csp\": \"default-src 'self'; script-src 'self' 'nonce-{nonce}'\"` in `plugins-config.json` and write each inline script as `<script nonce=\"{{cspNonce}}\">`.\nWith a nonce, also set `\"keyEnv\": \"SECURE_KEY\"` there, and `SECURE_KEY=` (`openssl rand -hex 32`) in `.env.development` and where production runs: the disk page cache outlives a restart.",
   "templateFunctions": [
     {
       "name": "cspNonce",
