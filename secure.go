@@ -59,6 +59,10 @@ import (
 // Name is the plugin's name, and the key its configuration is found under.
 const Name = "elagoht/secure"
 
+// DefaultKeyEnv is the environment variable the key is read from when neither
+// KeyEnv nor Key is set. Unlike one KeyEnv names, it may be unset or empty.
+const DefaultKeyEnv = "SECURE_KEY"
+
 // Options configures the plugin. Each header has a default; "-" leaves one out.
 type Options struct {
 	// CSP is the Content-Security-Policy. "{nonce}" in it is replaced by the
@@ -91,6 +95,7 @@ type Options struct {
 	ContentTypeOptions string `json:"contentTypeOptions"`
 	// KeyEnv names the environment variable holding the key, hex-encoded. When
 	// set, it wins over Key, and an empty or non-hex variable is an error.
+	// Unset, with no Key either, the key is read from SECURE_KEY (DefaultKeyEnv).
 	KeyEnv string `json:"keyEnv"`
 	// Key makes the nonce placeholder the same in every process: at least 32
 	// random bytes, the same on every instance and across restarts. Unset, the
@@ -116,7 +121,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.3.2" }
+func (p *Plugin) Version() string                { return "0.4.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Configure reads the configuration and adds {{cspNonce}}.
@@ -137,6 +142,12 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 			return fmt.Errorf("secure: key: the environment variable %s is not valid hex", o.KeyEnv)
 		}
 		o.Key = key
+	} else if raw := os.Getenv(DefaultKeyEnv); raw != "" && len(o.Key) == 0 {
+		key, err := hex.DecodeString(raw)
+		if err != nil {
+			return fmt.Errorf("secure: key: the environment variable %s is not valid hex", DefaultKeyEnv)
+		}
+		o.Key = key
 	}
 	if len(o.Key) > 0 && len(o.Key) < 32 {
 		return errors.New("secure: key: the key must be at least 32 bytes")
@@ -152,7 +163,8 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	} else {
 		// Random per process: a page rendering text a visitor supplied cannot
 		// contain it, and so cannot be handed a nonce. A page a disk cache kept
-		// from another process carries another placeholder: set a key.
+		// from another process carries another placeholder: set a key
+		// (SECURE_KEY).
 		var raw [12]byte
 		if _, err := rand.Read(raw[:]); err != nil {
 			return fmt.Errorf("secure: %w", err)

@@ -100,10 +100,18 @@ attribute and matches no header until the entry expires. Set a key, and the
 placeholder is derived from it and is the same in every process.
 
 The key is at least 32 random bytes, the same on every instance and across
-restarts. A secret never goes in `plugins-config.json`: `keyEnv` names the
-environment variable holding it, hex-encoded (`openssl rand -hex 32`), or
-`Options.Key` takes the bytes from Go; `keyEnv` wins when both are set. A key
-shorter than that, a variable that is empty or not hex, is an error at start. It is also
+restarts, hex-encoded (`openssl rand -hex 32`) in the environment variable
+`SECURE_KEY`, which is read with nothing configured:
+
+```sh
+SECURE_KEY=…  # in .env.development, and where production runs
+```
+
+A secret never goes in `plugins-config.json`: to read another variable, `keyEnv`
+names it, or `Options.Key` takes the bytes from Go. A named `keyEnv` wins over
+`Options.Key`, which wins over `SECURE_KEY`. A key shorter than that, a named
+variable that is empty or not hex, or a `SECURE_KEY` that is not hex, is an
+error at start. It is also
 what keeps the placeholder unguessable, so text a visitor supplied cannot contain
 it; keep it secret.
 
@@ -117,7 +125,6 @@ it; keep it secret.
     "hsts": 63072000,
     "hstsSubdomains": true,
     "frameOptions": "DENY",
-    "keyEnv": "SECURE_KEY",
     "permissionsPolicy": "camera=(), microphone=(), geolocation=()"
   }
 }

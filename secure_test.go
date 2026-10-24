@@ -588,9 +588,31 @@ func TestKey_EnvAndOptionsAgree(t *testing.T) {
 	}
 }
 
+// With no keyEnv and no Key, SECURE_KEY is the key: a page another process
+// cached is still given its nonce.
+func TestKey_DefaultEnv(t *testing.T) {
+	t.Setenv(secure.DefaultKeyEnv, hex.EncodeToString(bytes.Repeat([]byte{5}, 32)))
+	dir := t.TempDir()
+	opts := secure.Options{CSP: "script-src 'nonce-{nonce}'"}
+	for i, h := range []http.Handler{diskSite(t, dir, opts), diskSite(t, dir, opts)} {
+		_, body, nonce := fetch(t, h, http.MethodGet, "/")
+		m := nonceAttr.FindStringSubmatch(body)
+		if m == nil || strings.Contains(body, "collage-csp-nonce") || nonce != m[1] {
+			t.Errorf("site %d: body %q, header nonce %q", i, body, nonce)
+		}
+	}
+	t.Setenv(secure.DefaultKeyEnv, "zz")
+	_, err := collagetest.TrySite(t, collagetest.WithPlugins(secure.New(secure.Options{})))
+	if err == nil || !strings.Contains(err.Error(), "SECURE_KEY is not valid hex") {
+		t.Errorf("bad SECURE_KEY: err = %v", err)
+	}
+	collagetest.NewSite(t, collagetest.WithPlugins(secure.New(secure.Options{Key: bytes.Repeat([]byte{5}, 32)})))
+}
+
 // Without a key the placeholder is random per process, as before: a page cached
 // by another process carries a placeholder this one does not know.
 func TestNoKey_PlaceholderIsPerProcess(t *testing.T) {
+	t.Setenv(secure.DefaultKeyEnv, "")
 	dir := t.TempDir()
 	opts := secure.Options{CSP: "script-src 'nonce-{nonce}'"}
 	fetch(t, diskSite(t, dir, opts), http.MethodGet, "/")
